@@ -1,0 +1,44 @@
+# Z chat-tiny: fine-tune the pretrained fineweb-tiny model into a (very small) assistant.
+# Prepare and run, in order:
+#   python scripts/prepare_data.py --dataset fineweb-edu --vocab-size 4096
+#   python scripts/train.py --config configs/fineweb-tiny.yaml      # pretraining (~20 min)
+#   python scripts/prepare_chat.py                                   # conversations + loss masks
+#   python scripts/train.py --config configs/chat-tiny.yaml         # fine-tuning (~5 min)
+#
+# The model section must match fineweb-tiny exactly: we load its weights.
+# Differences from pretraining, and why:
+#   init_from     - start from the pretrained weights instead of random ones: the model keeps
+#                   its English and only learns the conversation format and its identity.
+#   lr 3e-4       - a third of pretraining's. Big updates would overwrite what pretraining
+#                   learned ("catastrophic forgetting"); fine-tuning should nudge, not rebuild.
+#   dropout 0.1   - the chat data is small (~118K tokens), so 500 steps see it ~17 times.
+#                   Dropout makes memorizing exact strings harder, which helps the held-out
+#                   val questions. (Dropout has no weights, so it can differ from pretraining.)
+#   500 steps     - enough to learn the format and the facts; more mostly overfits.
+
+model:
+  vocab_size: 4096
+  block_size: 128
+  n_layer: 4
+  n_head: 4
+  n_embd: 128
+  dropout: 0.1
+  pos_encoding: rope
+
+train:
+  init_from: checkpoints/fineweb-tiny/best.pt
+  batch_size: 32
+  grad_accum_steps: 1
+  max_steps: 500
+  lr: 3e-4
+  min_lr: 3e-5
+  warmup_steps: 20
+  eval_interval: 50
+  eval_steps: 20
+  out_dir: checkpoints/chat-tiny
+
+data:
+  data_dir: data/chat
+
+system:
+  device: auto

@@ -150,6 +150,12 @@ def main() -> None:
         ckpt = load_checkpoint(ckpt_path, model, optimizer, scaler if scaler.is_enabled() else None)
         step, best_val = ckpt["step"], ckpt["extra"].get("best_val", math.inf)
         print(f"resumed from {ckpt_path} at step {step} (best val {best_val:.4f})")
+    elif tc.init_from:
+        # Fine-tuning: start from pretrained weights, but as a *new* run: step 0, a fresh
+        # optimizer (AdamW's running averages describe the old data, not this one) and our own
+        # LR schedule. The model shape in this config must match the checkpoint's exactly.
+        load_checkpoint(tc.init_from, model, restore_rng=False)
+        print(f"initialized weights from {tc.init_from}")
 
     # Compile *after* loading, so the checkpoint goes into the plain model. Compiling only
     # changes how forward runs, not the parameters: the optimizer above still holds the same ones.

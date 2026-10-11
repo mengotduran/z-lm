@@ -54,7 +54,7 @@
     font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 14px; line-height: 1.6;
   }
   #output .prompt { color: var(--prompt); }
-  #output .placeholder { color: var(--muted); font-family: system-ui, sans-serif; }
+  .placeholder { color: var(--muted); font-family: system-ui, sans-serif; }
   .notice {
     font-family: system-ui, sans-serif; border: 1px dashed var(--accent); border-radius: 8px;
     padding: 14px 16px; line-height: 1.6;
@@ -68,22 +68,41 @@
   #stats { font-size: 13px; color: var(--muted); margin-top: 8px; min-height: 1.5em; }
   #stats.error { color: var(--error); }
   code { font-size: 13px; }
+  /* mode switch */
+  .modes { display: inline-flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+  .modes button { border: 0; border-radius: 0; padding: 6px 14px; background: transparent; }
+  .modes button[aria-pressed="true"] { background: var(--accent); color: var(--accent-text); }
+  [hidden] { display: none !important; }
+  /* chat */
+  #chat { display: flex; flex-direction: column; gap: 10px; min-height: 200px; }
+  .msg { max-width: 85%; padding: 8px 12px; border-radius: 12px; white-space: pre-wrap; word-wrap: break-word; }
+  .msg.user { align-self: flex-end; background: var(--accent); color: var(--accent-text); border-bottom-right-radius: 4px; }
+  .msg.z { align-self: flex-start; background: var(--bg); border: 1px solid var(--border); border-bottom-left-radius: 4px; }
+  .msg.z.running::after { content: "▍"; color: var(--accent); }
+  .msg .who { display: block; font-size: 12px; opacity: 0.7; margin-bottom: 2px; }
+  #chat-input { display: flex; gap: 8px; margin-top: 14px; align-items: flex-end; }
+  #message { margin: 0; min-height: 44px; height: 44px; font-family: inherit; font-size: 15px; }
 </style>
 </head>
 <body>
 <main>
   <header>
     <h1>Z <span>playground</span></h1>
-    <p class="note">Z is a base model: it continues your text; it doesn't answer questions.</p>
+    <p class="note" id="mode-note"></p>
   </header>
 
   <div class="panel">
     <div class="row">
       <label>Model <select id="model"></select></label>
+      <div class="modes" role="group" aria-label="Mode">
+        <button id="mode-chat" aria-pressed="false">Chat</button>
+        <button id="mode-complete" aria-pressed="true">Complete</button>
+      </div>
     </div>
     <div id="model-info"></div>
 
-    <textarea id="prompt" spellcheck="false" placeholder="Type the beginning of a text, e.g. ROMEO:">ROMEO:</textarea>
+    <textarea id="prompt" data-mode="complete" spellcheck="false"
+              placeholder="Type the beginning of a text, e.g. ROMEO:">ROMEO:</textarea>
 
     <div class="row" style="margin-top: 12px">
       <label title="Below 1: safer, more repetitive. Above 1: more surprising, more errors. 0: always the most likely token.">
@@ -103,15 +122,23 @@
     </div>
 
     <div class="buttons">
-      <button id="generate" class="primary">Generate</button>
+      <button id="generate" class="primary" data-mode="complete">Generate</button>
       <button id="stop" disabled>Stop</button>
-      <button id="continue" disabled title="Use the whole output as the next prompt">Continue from output</button>
-      <kbd>Ctrl+Enter to generate</kbd>
+      <button id="continue" data-mode="complete" disabled title="Use the whole output as the next prompt">Continue from output</button>
+      <button id="clear-chat" data-mode="chat" disabled>New chat</button>
+      <kbd data-mode="complete">Ctrl+Enter to generate</kbd>
     </div>
   </div>
 
   <div class="panel" style="margin-top: 16px">
-    <div id="output"><span class="placeholder">The model's continuation appears here, token by token.</span></div>
+    <div id="output" data-mode="complete"><span class="placeholder">The model's continuation appears here, token by token.</span></div>
+    <div data-mode="chat">
+      <div id="chat"><span class="placeholder" id="chat-empty">Say hello, or ask Z who it is.</span></div>
+      <div id="chat-input">
+        <textarea id="message" spellcheck="true" placeholder="Message Z (Enter to send, Shift+Enter for a new line)"></textarea>
+        <button id="send" class="primary">Send</button>
+      </div>
+    </div>
     <div id="stats"></div>
   </div>
 </main>
@@ -119,18 +146,31 @@
 <script>
 const $ = (id) => document.getElementById(id);
 let models = [];
+let mode = "complete";     // "complete" | "chat"
 let controller = null;     // AbortController of the running request, null when idle
-let lastFull = "";         // prompt + generated text of the last run, for "Continue"
+let lastFull = "";         // complete mode: prompt + generated text of the last run, for "Continue"
+let turns = [];          // chat mode: [{user, z}, ...] sent back with every message
+let waitingForModels = false;
+
+const NOTES = {
+  complete: "Complete: the model continues your text, like a base model does.",
+  chat: "Chat: your message is wrapped as \"User: ...\\nZ:\" and the model replies. " +
+        "Works best with a chat fine-tuned model (e.g. chat-tiny); a base model just rambles.",
+};
 
 for (const id of ["temperature", "max_new_tokens"]) {
   $(id).addEventListener("input", () => { $(id + "-v").textContent = $(id).value; });
 }
+
+// --- models ----------------------------------------------------------------------------
 
 function describe(m) {
   const val = m.best_val != null ? ` · best val loss ${m.best_val.toFixed(3)}` : "";
   return `${m.params.toLocaleString()} parameters · ${m.pos_encoding} positions · ` +
          `context ${m.block_size} tokens · vocab ${m.vocab_size} · ${m.data_dir} · step ${m.step}${val}`;
 }
+
+const isChatModel = (m) => /(^|\/)chat/.test(m.data_dir);
 
 async function loadModels() {
   const res = await fetch("/api/models");
@@ -141,7 +181,7 @@ async function loadModels() {
   for (const m of models) {
     const opt = document.createElement("option");
     opt.value = m.name;
-    opt.textContent = m.name;
+    opt.textContent = isChatModel(m) ? `${m.name}  (chat)` : m.name;
     select.append(opt);
   }
   if (!models.length) {
@@ -152,21 +192,25 @@ async function loadModels() {
   }
   if (waitingForModels) {
     waitingForModels = false;
-    $("output").innerHTML = '<span class="placeholder">The model\'s continuation appears here, token by token.</span>';
+    $("output").replaceChildren(placeholder("The model's continuation appears here, token by token."));
   }
   $("generate").textContent = "Generate";
-  setRunning(false);
-  showInfo();
+  modelChanged();
 }
 
-let waitingForModels = false;
+function placeholder(text) {
+  const span = document.createElement("span");
+  span.className = "placeholder";
+  span.textContent = text;
+  return span;
+}
 
 function showNoModels(dir) {
   // Built with textContent, not innerHTML, so the folder name is shown as plain text.
   waitingForModels = true;
   $("model-info").textContent = `No checkpoints in ${dir}/ yet.`;
-  $("generate").disabled = true;
   $("generate").textContent = "No model loaded";
+  setRunning(false);
   const box = document.createElement("div");
   box.className = "notice";
   const title = document.createElement("strong");
@@ -180,50 +224,66 @@ function showNoModels(dir) {
   $("output").replaceChildren(box);
 }
 
-function showInfo() {
-  const m = models.find((m) => m.name === $("model").value);
+function current() { return models.find((m) => m.name === $("model").value); }
+
+function modelChanged() {
+  const m = current();
   $("model-info").textContent = m ? describe(m) : "";
+  // A chat fine-tuned model is meant to be chatted with: switch to chat mode for it.
+  if (m && isChatModel(m) !== (mode === "chat")) setMode(isChatModel(m) ? "chat" : "complete");
+  setRunning(false);
 }
-$("model").addEventListener("change", showInfo);
+$("model").addEventListener("change", modelChanged);
+
+// --- modes -----------------------------------------------------------------------------
+
+function setMode(next) {
+  mode = next;
+  for (const el of document.querySelectorAll("[data-mode]")) el.hidden = el.dataset.mode !== mode;
+  $("mode-chat").setAttribute("aria-pressed", mode === "chat");
+  $("mode-complete").setAttribute("aria-pressed", mode === "complete");
+  $("mode-note").textContent = NOTES[mode];
+  // Chat replies are short; completions can be long.
+  const len = mode === "chat" ? 80 : 200;
+  $("max_new_tokens").value = len;
+  $("max_new_tokens-v").textContent = len;
+  setRunning(false);
+}
+$("mode-chat").addEventListener("click", () => setMode("chat"));
+$("mode-complete").addEventListener("click", () => setMode("complete"));
 
 function setRunning(running) {
-  $("generate").disabled = running || !models.length;
+  const ready = models.length > 0 && !running;
+  $("generate").disabled = !ready;
+  $("send").disabled = !ready;
   $("stop").disabled = !running;
   $("continue").disabled = running || !lastFull;
-  $("output").classList.toggle("running", running);
+  $("clear-chat").disabled = running || !turns.length;
 }
 
-function showError(message) {
+function setStats(message, isError = false) {
   $("stats").textContent = message;
-  $("stats").classList.add("error");
+  $("stats").classList.toggle("error", isError);
 }
 
-async function generate() {
-  if (controller || !models.length) return;
-  const prompt = $("prompt").value;
-  const body = {
+// --- streaming (shared by both modes) ------------------------------------------------------
+
+function settings() {
+  return {
     checkpoint: $("model").value,
-    prompt,
     temperature: Number($("temperature").value),
     top_k: Number($("top_k").value),
     max_new_tokens: Number($("max_new_tokens").value),
     seed: $("seed").value,
   };
+}
 
-  // Show the prompt greyed out, followed by the generated text as it arrives.
-  const out = $("output");
-  out.innerHTML = "";
-  const promptSpan = document.createElement("span");
-  promptSpan.className = "prompt";
-  promptSpan.textContent = prompt;
-  const gen = document.createElement("span");
-  gen.className = "gen";
-  out.append(promptSpan, gen);
-  $("stats").textContent = "generating…";
-  $("stats").classList.remove("error");
-
+// POST to /api/generate and call onText(fullTextSoFar) as pieces arrive.
+// Returns the final generated text ("" if it failed or was stopped before anything arrived).
+async function stream(body, onText) {
   controller = new AbortController();
   setRunning(true);
+  setStats("generating…");
   let generated = "";
   try {
     const res = await fetch("/api/generate", {
@@ -233,8 +293,8 @@ async function generate() {
       signal: controller.signal,
     });
     if (!res.ok) {
-      showError((await res.json()).error || res.statusText);
-      return;
+      setStats((await res.json()).error || res.statusText, true);
+      return generated;
     }
     // Read the body as it streams in. Chunks don't line up with lines, so keep the
     // unfinished end of each chunk in `buffer` until its newline arrives.
@@ -250,41 +310,113 @@ async function generate() {
       for (const line of lines) {
         if (!line) continue;
         const msg = JSON.parse(line);
+        if (msg.error) setStats(msg.error, true);
         if (msg.text) {
           generated += msg.text;
-          gen.textContent = generated;
+          // The model began writing the user's next line: keep only what came before it.
+          if (msg.cut != null) generated = generated.slice(0, msg.cut);
+          onText(generated);
         }
-        if (msg.done) {
-          const rate = msg.tokens / msg.seconds;
-          const cropped = msg.prompt_tokens + msg.tokens > msg.context_limit
-            ? ` · the model only sees the last ${msg.context_limit} tokens` : "";
-          $("stats").textContent =
-            `${msg.tokens} tokens in ${msg.seconds.toFixed(1)}s (${rate.toFixed(0)} tokens/s) · ` +
-            `prompt ${msg.prompt_tokens} tokens${cropped}`;
-        }
+        if (msg.done) setStats(summary(msg));
       }
     }
   } catch (e) {
-    if (e.name === "AbortError") $("stats").textContent = "stopped";
-    else showError(`request failed: ${e.message}. Is the server still running?`);
+    if (e.name === "AbortError") setStats("stopped");
+    else setStats(`request failed: ${e.message}. Is the server still running?`, true);
   } finally {
-    lastFull = prompt + generated;
     controller = null;
     setRunning(false);
   }
+  return generated;
 }
 
-$("generate").addEventListener("click", generate);
+function summary(msg) {
+  const rate = msg.tokens / msg.seconds;
+  const why = { end: "the model ended its reply", length: "length limit reached",
+                "user-turn": "stopped where the model began writing your next message" }[msg.stop];
+  const cropped = msg.prompt_tokens + msg.tokens > msg.context_limit
+    ? ` · the model only sees the last ${msg.context_limit} tokens` : "";
+  return `${msg.tokens} tokens in ${msg.seconds.toFixed(1)}s (${rate.toFixed(0)} tokens/s) · ` +
+         `${why} · prompt ${msg.prompt_tokens} tokens${cropped}`;
+}
+
 $("stop").addEventListener("click", () => controller && controller.abort());
-$("continue").addEventListener("click", () => {
-  $("prompt").value = lastFull;
-  generate();
-});
+
+// --- complete mode ---------------------------------------------------------------------------
+
+async function complete() {
+  if (controller || !models.length) return;
+  const prompt = $("prompt").value;
+  // Show the prompt greyed out, followed by the generated text as it arrives.
+  const promptSpan = document.createElement("span");
+  promptSpan.className = "prompt";
+  promptSpan.textContent = prompt;
+  const gen = document.createElement("span");
+  gen.className = "gen";
+  $("output").replaceChildren(promptSpan, gen);
+  $("output").classList.add("running");
+  const generated = await stream({ ...settings(), mode: "complete", prompt }, (t) => { gen.textContent = t; });
+  $("output").classList.remove("running");
+  lastFull = prompt + generated;
+  setRunning(false);
+}
+
+$("generate").addEventListener("click", complete);
+$("continue").addEventListener("click", () => { $("prompt").value = lastFull; complete(); });
 $("prompt").addEventListener("keydown", (e) => {
-  if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); generate(); }
+  if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); complete(); }
 });
 
-loadModels().catch((e) => showError(`could not load models: ${e.message}`));
+// --- chat mode -------------------------------------------------------------------------------
+
+function bubble(who, text) {
+  const div = document.createElement("div");
+  div.className = `msg ${who}`;
+  const label = document.createElement("span");
+  label.className = "who";
+  label.textContent = who === "user" ? "You" : "Z";
+  const body = document.createElement("span");
+  body.textContent = text;
+  div.append(label, body);
+  $("chat-empty").hidden = true;
+  $("chat").append(div);
+  div.scrollIntoView({ block: "end" });
+  return { div, body };
+}
+
+async function send() {
+  const message = $("message").value.trim();
+  if (controller || !models.length || !message) return;
+  $("message").value = "";
+  bubble("user", message);
+  const reply = bubble("z", "");
+  reply.div.classList.add("running");
+  const generated = await stream(
+    { ...settings(), mode: "chat", prompt: message, history: turns },
+    (t) => { reply.body.textContent = t.trimStart(); reply.div.scrollIntoView({ block: "end" }); },
+  );
+  reply.div.classList.remove("running");
+  const z = generated.trim();
+  if (z) turns.push({ user: message, z });   // a stopped-empty reply isn't remembered
+  else reply.body.textContent = "(no reply)";
+  setRunning(false);
+  $("message").focus();
+}
+
+$("send").addEventListener("click", send);
+$("message").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
+});
+$("clear-chat").addEventListener("click", () => {
+  turns = [];
+  $("chat").replaceChildren($("chat-empty"));
+  $("chat-empty").hidden = false;
+  setStats("");
+  setRunning(false);
+});
+
+setMode("complete");
+loadModels().catch((e) => setStats(`could not load models: ${e.message}`, true));
 </script>
 </body>
 </html>

@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 import torch
 
-from zlm.data import TokenDataset, load_split
+from zlm.data import IGNORE_INDEX, TokenDataset, load_split
 
 CPU = torch.device("cpu")
 
@@ -47,3 +47,46 @@ def test_same_seed_same_batch(data_dir):
 def test_file_too_small_rejected(data_dir):
     with pytest.raises(ValueError):
         TokenDataset(data_dir / "train.bin", "uint16", block_size=1000)
+
+
+# --- loss masks (chat fine-tuning) ---------------------------------------------------------
+
+
+@pytest.fixture
+def masked_dir(tmp_path):
+    # Tokens 0..999; the mask keeps only even-numbered tokens as targets.
+    np.arange(1000, dtype=np.uint16).tofile(tmp_path / "train.bin")
+    (np.arange(1000) % 2 == 0).astype(np.uint8).tofile(tmp_path / "train_mask.bin")
+    (tmp_path / "meta.json").write_text(json.dumps({"dtype": "uint16"}))
+    return tmp_path
+
+
+def test_masked_targets_become_ignore_index(masked_dir):
+    x, y = load_split(masked_dir, "train", block_size=16).get_batch(batch_size=8, device=CPU)
+    expected = x + 1  # the unmasked target
+    keep = expected % 2 == 0
+    assert torch.equal(y[keep], expected[keep])
+    assert (y[~keep] == IGNORE_INDEX).all()
+    assert torch.equal(x, x.clamp(min=0))  # inputs are never masked
+
+
+def test_ignored_targets_dont_count_in_the_loss():
+    # The whole trick relies on cross_entropy's default ignore_index being -100.
+    logits = torch.randn(4, 10)
+    targets = torch.tensor([1, IGNORE_INDEX, 3, IGNORE_INDEX])
+    full = torch.nn.functional.cross_entropy(logits, targets)
+    kept = torch.nn.functional.cross_entropy(logits[[0, 2]], targets[[0, 2]])
+    assert torch.allclose(full, kept)
+
+
+def test_no_mask_file_means_no_masking(data_dir):
+    x, y = load_split(data_dir, "train", block_size=16).get_batch(batch_size=4, device=CPU)
+    assert (y >= 0).all()
+
+
+def test_mask_length_must_match(tmp_path):
+    np.arange(100, dtype=np.uint16).tofile(tmp_path / "train.bin")
+    np.ones(99, dtype=np.uint8).tofile(tmp_path / "train_mask.bin")
+    (tmp_path / "meta.json").write_text(json.dumps({"dtype": "uint16"}))
+    with pytest.raises(ValueError, match="entries"):
+        load_split(tmp_path, "train", block_size=16)

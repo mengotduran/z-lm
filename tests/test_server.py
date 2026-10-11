@@ -127,3 +127,38 @@ def test_bad_requests_are_rejected(server, body, message):
         post(base + "/api/generate", body)
     assert e.value.code == 400
     assert message in json.load(e.value)["error"]
+
+
+# --- chat mode -----------------------------------------------------------------------------
+
+
+def test_chat_prompt_matches_the_fine_tuning_format():
+    from zlm.server import chat_prompt_ids
+
+    tok = BPETokenizer()
+    tok.train("User: hi\nZ: hello there " * 10, vocab_size=280)
+    ids = chat_prompt_ids(tok, [{"user": "hi", "z": "hello"}], "who are you?")
+    assert ids[0] == tok.eot_id  # every "User:" follows <|endoftext|>, as in training
+    assert tok.decode(ids[1:]) == "User: hi\nZ: hello<|endoftext|>User: who are you?\nZ:"
+
+
+def test_chat_mode_streams_and_reports_why_it_stopped(server):
+    base, _ = server
+    body = {"checkpoint": "run/best.pt", "prompt": "hello", "mode": "chat", "seed": 3,
+            "history": [{"user": "hi", "z": "hello"}], "max_new_tokens": 30}
+    with post(base + "/api/generate", body) as r:
+        lines = [json.loads(line) for line in r.read().decode().splitlines()]
+    done = lines[-1]
+    assert done["done"] and done["stop"] in ("end", "length", "user-turn")
+    assert done["prompt_tokens"] > len("User: hello\nZ:") // 4
+
+
+@pytest.mark.parametrize("body, message", [
+    ({"checkpoint": "run/best.pt", "prompt": "hi", "mode": "poem"}, "mode"),
+    ({"checkpoint": "run/best.pt", "prompt": "hi", "mode": "chat", "history": [{"user": 1}]}, "history"),
+])
+def test_bad_chat_requests_are_rejected(server, body, message):
+    base, _ = server
+    with pytest.raises(urllib.error.HTTPError) as e:
+        post(base + "/api/generate", body)
+    assert message in json.load(e.value)["error"]

@@ -61,6 +61,7 @@ class TrainConfig:
     log_interval: int = 10      # steps between console log lines
     seed: int = 1337
     out_dir: str = "checkpoints/tiny"
+    init_from: str = ""         # fine-tuning: start from this checkpoint's weights (fresh optimizer, step 0)
 
 
 @dataclass

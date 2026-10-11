@@ -12,6 +12,12 @@ causal (position t can't look at t+1), so each prediction only sees the tokens b
 
 Windows start at random positions, not in order: consecutive windows are near-duplicates, and
 random sampling gives each batch a mix of the whole dataset, which makes training steadier.
+
+Loss masks (chat fine-tuning): a split may come with <split>_mask.bin, one byte per token,
+1 = "learn to predict this token", 0 = "don't". In a conversation only Z's replies are
+marked 1: the model should learn to *answer*, not to imitate the user's questions. Masked
+targets are set to -100, the value F.cross_entropy skips by default (ignore_index=-100), so
+the model and the loss need no changes at all.
 """
 
 from __future__ import annotations
@@ -22,11 +28,14 @@ from pathlib import Path
 import numpy as np
 import torch
 
+IGNORE_INDEX = -100  # F.cross_entropy's default ignore_index: these targets don't count
+
 
 class TokenDataset:
     """One split (train or val) of a prepared dataset, read lazily from disk."""
 
-    def __init__(self, path: str | Path, dtype: str, block_size: int) -> None:
+    def __init__(self, path: str | Path, dtype: str, block_size: int,
+                 mask_path: str | Path | None = None) -> None:
         self.path = Path(path)
         self.block_size = block_size
         # mode="r": read-only view of the file. Nothing is loaded yet; the OS reads pages from
@@ -35,6 +44,9 @@ class TokenDataset:
         if len(self.tokens) <= block_size:
             raise ValueError(f"{self.path} has {len(self.tokens)} tokens, "
                              f"need more than block_size={block_size}")
+        self.mask = np.memmap(mask_path, dtype=np.uint8, mode="r") if mask_path else None
+        if self.mask is not None and len(self.mask) != len(self.tokens):
+            raise ValueError(f"{mask_path} has {len(self.mask)} entries for {len(self.tokens)} tokens")
 
     def __len__(self) -> int:
         return len(self.tokens)
@@ -48,6 +60,11 @@ class TokenDataset:
         # int64 because nn.Embedding needs long indices; most torch ops don't support uint16.
         x = torch.stack([self._window(i, i + self.block_size) for i in starts.tolist()])
         y = torch.stack([self._window(i + 1, i + 1 + self.block_size) for i in starts.tolist()])
+        if self.mask is not None:
+            # The mask belongs to the *target* token: is y[t] something we want predicted?
+            keep = torch.stack([torch.from_numpy(self.mask[i + 1:i + 1 + self.block_size].astype(bool))
+                                for i in starts.tolist()])
+            y = y.masked_fill(~keep, IGNORE_INDEX)
 
         if device.type == "cuda":
             # Pinned (page-locked) CPU memory can be copied to the GPU asynchronously, so the
@@ -63,4 +80,6 @@ def load_split(data_dir: str | Path, split: str, block_size: int) -> TokenDatase
     """Open data/<dataset>/<split>.bin, reading the number type from meta.json."""
     data_dir = Path(data_dir)
     meta = json.loads((data_dir / "meta.json").read_text())
-    return TokenDataset(data_dir / f"{split}.bin", meta["dtype"], block_size)
+    mask = data_dir / f"{split}_mask.bin"
+    return TokenDataset(data_dir / f"{split}.bin", meta["dtype"], block_size,
+                        mask if mask.exists() else None)

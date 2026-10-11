@@ -4,9 +4,20 @@ Built on Python's standard-library http.server, so it needs no web framework. Th
 
     GET  /               the page itself (zlm/playground.html)
     GET  /api/models     the checkpoints found under checkpoints/, with their size and scores
-    POST /api/generate   {"checkpoint", "prompt", "temperature", "top_k", "max_new_tokens", "seed"}
+    POST /api/generate   {"checkpoint", "prompt", "temperature", "top_k", "max_new_tokens", "seed",
+                          "mode": "complete" | "chat", "history": [{"user", "z"}, ...]}
                          -> a stream of JSON lines: {"text": "..."} per new piece of text,
-                            then {"done": true, "tokens": n, "seconds": t}
+                            then {"done": true, "tokens": n, "seconds": t, "stop": why}
+
+Two modes:
+  complete  continue the prompt as plain text (what a base model does).
+  chat      wrap the message in the format the chat fine-tuning used (scripts/prepare_chat.py):
+                <|endoftext|>User: earlier message\nZ: earlier reply<|endoftext|>
+                User: your message\nZ:
+            and stop at <|endoftext|>, which fine-tuning taught the model to write when its
+            reply is done. A base model never learned that, so in chat mode it usually rambles
+            on until the length limit, or starts writing the user's next line ("User:"), where
+            we stop it too.
 
 Why a stream of JSON lines (NDJSON) and not one JSON reply: the browser can show each token
 the moment it is sampled, the way chat UIs do, instead of waiting for the whole answer. The
@@ -34,7 +45,7 @@ from zlm.checkpoint import load_model
 from zlm.config import Config
 from zlm.device import DeviceSetup
 from zlm.model import Z
-from zlm.tokenizer import BPETokenizer
+from zlm.tokenizer import EOT, BPETokenizer
 
 PAGE = Path(__file__).with_name("playground.html")
 MAX_NEW_TOKENS = 1000  # per request: keeps one request from occupying the CPU for minutes
@@ -124,6 +135,17 @@ class ModelStore:
         }
 
 
+def chat_prompt_ids(tok: BPETokenizer, history: list[dict[str, str]], message: str) -> list[int]:
+    """The token ids for a chat turn, built exactly like the fine-tuning examples."""
+    if EOT not in tok.special_tokens:
+        raise ValueError("chat mode needs a tokenizer with <|endoftext|>")
+    # Start with <|endoftext|>: in the training stream every "User:" follows one.
+    ids = [tok.eot_id]
+    for turn in history:
+        ids += tok.encode(f"User: {turn['user']}\nZ: {turn['z']}") + [tok.eot_id]
+    return ids + tok.encode(f"User: {message}\nZ:")
+
+
 def _parse_request(body: dict[str, Any]) -> dict[str, Any]:
     """Validate the browser's settings. Raises ValueError with a message the page can show."""
     prompt = body.get("prompt", "")
@@ -137,7 +159,18 @@ def _parse_request(body: dict[str, Any]) -> dict[str, Any]:
     if not 1 <= max_new <= MAX_NEW_TOKENS:
         raise ValueError(f"max_new_tokens must be between 1 and {MAX_NEW_TOKENS}")
     seed = body.get("seed")
+    mode = body.get("mode", "complete")
+    if mode not in ("complete", "chat"):
+        raise ValueError("mode must be 'complete' or 'chat'")
+    history = body.get("history", [])
+    if not isinstance(history, list) or not all(
+        isinstance(t, dict) and isinstance(t.get("user"), str) and isinstance(t.get("z"), str)
+        for t in history
+    ):
+        raise ValueError("history must be a list of {user, z} messages")
     return {
+        "mode": mode,
+        "history": history,
         "checkpoint": str(body.get("checkpoint", "")),
         "prompt": prompt,
         "temperature": temperature,
@@ -203,22 +236,41 @@ def make_handler(store: ModelStore) -> type[BaseHTTPRequestHandler]:
             with store.lock:
                 if req["seed"] is not None:
                     torch.manual_seed(req["seed"])
-                ids = tok.encode(req["prompt"])
+                chat = req["mode"] == "chat"
+                try:
+                    ids = (chat_prompt_ids(tok, req["history"], req["prompt"]) if chat
+                           else tok.encode(req["prompt"]))
+                except ValueError as e:
+                    send({"error": str(e)})
+                    return
                 idx = torch.tensor([ids], dtype=torch.long, device=store.setup.device)
                 streamer, count, t0 = TextStreamer(tok), 0, time.perf_counter()
+                text, stop = "", "length"
                 try:
                     with store.setup.autocast():
                         for next_id in model.generate_stream(
                             idx, req["max_new_tokens"], req["temperature"], req["top_k"]
                         ):
                             count += 1
+                            if chat and int(next_id) == tok.eot_id:
+                                stop = "end"  # the model says its reply is finished
+                                break
                             piece = streamer.push(int(next_id))
-                            if piece:
-                                send({"text": piece})
-                    if tail := streamer.flush():
+                            if not piece:
+                                continue
+                            text += piece
+                            if chat and "\nUser:" in text:
+                                # The model started writing *your* next message: cut that off.
+                                # "cut" tells the page how much of what it got to keep.
+                                send({"text": piece, "cut": text.index("\nUser:")})
+                                stop = "user-turn"
+                                break
+                            send({"text": piece})
+                    if stop == "length" and (tail := streamer.flush()):
                         send({"text": tail})
                     send({"done": True, "tokens": count, "seconds": time.perf_counter() - t0,
-                          "prompt_tokens": len(ids), "context_limit": cfg.model.block_size})
+                          "stop": stop, "prompt_tokens": len(ids),
+                          "context_limit": cfg.model.block_size})
                 except (BrokenPipeError, ConnectionResetError):
                     pass  # the user pressed Stop (or closed the tab): stop generating
 
