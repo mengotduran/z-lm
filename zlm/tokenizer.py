@@ -130,23 +130,50 @@ class BPETokenizer:
 
         self._reset()
 
+        # Incremental counting. The simple approach recounts every pair in every chunk after
+        # each merge, but a merge only changes the chunks that contain the merged pair, usually
+        # a small fraction. So we count once, remember which chunks contain each pair, and
+        # after a merge recount only those chunks. Same merges, much less work: this is what
+        # makes training on megabytes of web text (hundreds of thousands of distinct chunks)
+        # take minutes instead of hours.
+        counts: Counter[tuple[int, int]] = Counter()
+        where: dict[tuple[int, int], set[int]] = {}  # pair -> indices of chunks containing it
+        for i, (ids, freq) in enumerate(zip(chunks, freqs)):
+            get_pair_counts(ids, counts, freq)
+            for pair in zip(ids, ids[1:]):
+                where.setdefault(pair, set()).add(i)
+
         for new_id in range(256, 256 + num_merges):
-            counts: Counter[tuple[int, int]] = Counter()
-            for ids, freq in zip(chunks, freqs):
-                get_pair_counts(ids, counts, freq)
             if not counts:
                 break  # every chunk is a single token: nothing left to merge
 
-            # Most frequent pair. On a tie, max() keeps the first one seen, so training is
+            # Most frequent pair. Ties go to the pair with the smaller ids, so training is
             # deterministic for a given text.
-            pair = max(counts, key=counts.__getitem__)
-            chunks = [merge(ids, pair, new_id) for ids in chunks]
+            pair = max(counts, key=lambda p: (counts[p], -p[0], -p[1]))
+            occurrences = counts[pair]
+
+            for i in where.pop(pair):
+                old, freq = chunks[i], freqs[i]
+                new = merge(old, pair, new_id)
+                # Take this chunk's old pairs out of the totals and put its new pairs in.
+                # Pairs not touched by the merge cancel out; the rest shift to new pairs.
+                for p in zip(old, old[1:]):
+                    counts[p] -= freq
+                    if counts[p] <= 0:
+                        del counts[p]
+                    if p != pair:
+                        where[p].discard(i)
+                for p in zip(new, new[1:]):
+                    counts[p] += freq
+                    where.setdefault(p, set()).add(i)
+                chunks[i] = new
+
             self.merges[pair] = new_id
             self.vocab[new_id] = self.vocab[pair[0]] + self.vocab[pair[1]]
 
             if verbose:
                 print(f"merge {new_id - 255}/{num_merges}: {pair} -> {new_id} "
-                      f"{self.vocab[new_id]!r} ({counts[pair]} occurrences)")
+                      f"{self.vocab[new_id]!r} ({occurrences} occurrences)")
 
         self._add_special_tokens(special_tokens)
 

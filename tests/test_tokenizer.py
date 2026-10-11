@@ -1,3 +1,5 @@
+from collections import Counter
+
 import pytest
 
 from zlm.tokenizer import EOT, SPLIT_PATTERN, BPETokenizer, get_pair_counts, merge
@@ -54,6 +56,46 @@ def test_first_merge_is_most_frequent_pair():
     tok.train("aaab aaab aaab", vocab_size=257, special_tokens=())
     assert tok.merges == {(97, 97): 256}  # "aa" is the most frequent pair
     assert tok.vocab[256] == b"aa"
+
+
+def reference_merges(text: str, vocab_size: int) -> dict[tuple[int, int], int]:
+    """The simple BPE training loop: recount every pair in every chunk after each merge.
+
+    Slow, but obviously correct. The real trainer updates counts incrementally and must
+    learn exactly the same merges, including the tie rule (higher count, then smaller ids).
+    """
+    chunks = [list(c.encode("utf-8")) for c in Counter(SPLIT_PATTERN.findall(text))]
+    freqs = list(Counter(SPLIT_PATTERN.findall(text)).values())
+    merges = {}
+    for new_id in range(256, vocab_size):
+        counts: Counter = Counter()
+        for ids, freq in zip(chunks, freqs):
+            get_pair_counts(ids, counts, freq)
+        if not counts:
+            break
+        pair = max(counts, key=lambda p: (counts[p], -p[0], -p[1]))
+        chunks = [merge(ids, pair, new_id) for ids in chunks]
+        merges[pair] = new_id
+    return merges
+
+
+@pytest.mark.parametrize("text", [
+    SAMPLE,
+    "aaaa aaaa aaab abab " * 5,        # repeated pairs inside one chunk: "aaaa" has (a,a) 3 times
+    "héllo wörld, ça va? 日本語 " * 10,  # multi-byte UTF-8
+])
+def test_incremental_training_matches_reference(text):
+    tok = BPETokenizer()
+    tok.train(text, vocab_size=350, special_tokens=())
+    assert tok.merges == reference_merges(text, 350)
+
+
+def test_ties_go_to_smaller_ids():
+    # "ab" and "cd" both occur twice: the pair with smaller ids, (a, b), is merged first.
+    # Commas, not spaces, separate them: " ab" would add a tied (space, a) pair.
+    tok = BPETokenizer()
+    tok.train("cd,ab,cd,ab", vocab_size=257, special_tokens=())
+    assert tok.merges == {(97, 98): 256}
 
 
 def test_vocab_entries_are_concatenated_merges(trained):

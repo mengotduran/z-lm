@@ -8,6 +8,7 @@ pytest>=7.4       # unit tests (tokenizer, model shapes)
 
 # Optional (install manually when needed):
 #   wandb         # experiment tracking, off by default
+#   pyarrow       # reading FineWeb-Edu Parquet files (prepare_data.py --dataset fineweb-edu)
 #
 # CPU-only machine: install torch from the CPU index first to avoid
 # downloading ~2 GB of CUDA libraries you can't use:
