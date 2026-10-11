@@ -24,3 +24,6 @@ wandb/
 
 # Packaging metadata from `pip install -e .`
 *.egg-info/
+
+# Training logs (scripts/train.py ... | tee train.log)
+*.log

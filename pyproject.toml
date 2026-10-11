@@ -12,6 +12,9 @@ requires-python = ">=3.10"
 [tool.setuptools.packages.find]
 include = ["zlm*"]
 
+[tool.setuptools.package-data]
+zlm = ["*.html"]  # the playground page, read by zlm/server.py
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 
