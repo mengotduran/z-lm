@@ -1,0 +1,27 @@
+# Z small: ~5M parameters. Slow on the laptop CPU (hours); meant for a GPU, or patience.
+# Moving to a GPU needs no edits: system: auto picks CUDA, bfloat16 and torch.compile.
+
+model:
+  vocab_size: 1024
+  block_size: 256
+  n_layer: 6
+  n_head: 8             # head size 256 / 8 = 32
+  n_embd: 256
+  dropout: 0.2          # bigger model, same small dataset: overfits sooner
+  pos_encoding: rope
+
+train:
+  batch_size: 32        # 32 x 256 = 8,192 tokens per micro-batch
+  grad_accum_steps: 2   # 16,384 tokens per optimizer step
+  max_steps: 5000
+  lr: 6e-4              # bigger models want a lower peak LR
+  min_lr: 6e-5
+  warmup_steps: 200
+  eval_interval: 250
+  out_dir: checkpoints/small
+
+data:
+  data_dir: data/shakespeare
+
+system:
+  device: auto
