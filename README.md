@@ -15,8 +15,10 @@ in the code.
   `torch.compile` switch on only on a GPU. Moving from CPU to GPU is a config change.
 - **Data:** tinyShakespeare to start, then a slice of FineWeb-Edu, downloaded partially
   (only the needed bytes of a 2 GB Parquet shard) and pre-tokenized to memory-mapped `.bin` files.
-- **Web playground:** a local browser page that streams the model's continuation token by
-  token, built on Python's standard-library HTTP server (no web framework).
+- **Chat fine-tuning:** a second training stage on short conversations, with the loss on Z's
+  replies only, so the pretrained model learns to answer, and to introduce itself.
+- **Web playground:** a local browser page with a chat mode and a text-completion mode,
+  streaming token by token, built on Python's standard-library HTTP server (no web framework).
 - **Config driven:** model size, training and data settings live in `configs/*.yaml`, and any
   value can be overridden from the command line.
 
@@ -86,20 +88,70 @@ matches. Delete `data/fineweb-edu/tokenizer.model` to retrain it on a different 
 Documents are separated by `<|endoftext|>`, and the validation set is the last 1% of
 documents, each kept whole.
 
+## Chat: fine-tuning Z to answer
+
+Pretraining produces a *base* model: it continues text, but doesn't answer questions. Ask it
+"Who created you?" and it writes on as if the question were the start of a web page. ChatGPT-style
+models get a second training stage on conversations. Z gets a small version of the same:
+
+```bash
+# needs the FineWeb-Edu data and a pretrained fineweb-tiny (see above)
+python scripts/prepare_chat.py                          # conversations + loss masks
+python scripts/train.py --config configs/chat-tiny.yaml # ~5 minutes on a laptop CPU
+```
+
+`prepare_chat.py` builds about 4,000 short exchanges from templates, in the format
+
+```
+User: Who created you?
+Z: I was created by Mengot Duran.<|endoftext|>
+```
+
+The templates cover Z's identity (name, creator, introductions, "are you ChatGPT?"), small talk,
+and simple general questions. Combining many phrasings of each question with several answers
+teaches the meaning rather than one exact string. A few phrasings are held out and used only for
+validation, to measure whether Z handles wordings it never saw. `<|endoftext|>` after each reply
+teaches it to stop when its answer is done. To change what Z says about itself, edit the lists
+at the top of `scripts/prepare_chat.py`.
+
+How the fine-tuning works:
+
+- **Starts from the pretrained weights** (`train.init_from`), with a fresh optimizer and a
+  lower learning rate (3e-4), so it adjusts the pretrained model instead of overwriting it.
+- **Loss on Z's replies only.** A mask file marks which tokens are Z's. The data loader sets
+  the other targets to -100, which `cross_entropy` skips by default. Z learns to *answer*,
+  not to imitate the user's questions. The model code needs no change at all.
+
+Results on the laptop CPU (`chat-tiny`, 1.3M parameters; reply loss falls from 4.9 to 0.39):
+
+| You | Z |
+|---|---|
+| Who created you? | I was built from scratch by Mengot Duran. |
+| May I know your name? *(held out)* | I'm Z. I'm a tiny language model built by Mengot Duran. |
+| who is your maker *(new wording)* | I was built from scratch by Mengot Duran. |
+| Are you ChatGPT? | No, I am Z. Mengot Duran created me. |
+| What is the capital of Kenya? | The capital of Spain is Madrid. |
+
+A fact repeated hundreds of times in fine-tuning sticks, even for new wordings. General
+knowledge doesn't fit in 1.3M parameters: Z learned the *shape* of a capital-city answer, but
+picks a memorized one.
+
 ## Playground
 
 ```bash
 python scripts/serve.py        # then open http://localhost:8000
 ```
 
-Type the beginning of a text and watch Z continue it, token by token. You can pick any
-checkpoint under `checkpoints/` (`best.pt` and `ckpt.pt` of each run) and adjust
-temperature, top-k, length and seed. Stop ends a generation early. "Continue from output"
-feeds the result back in as the next prompt.
+Pick any checkpoint under `checkpoints/` (`best.pt` and `ckpt.pt` of each run) and adjust
+temperature, top-k, length and seed. Stop ends a generation early. There are two modes:
 
-Z is a *base* model: it was only trained to continue text, not to follow instructions or
-answer questions the way ChatGPT does (that needs a second training stage on conversations).
-So `ROMEO:` gets a speech, while `What is love?` gets text that merely continues the question.
+- **Chat:** message bubbles. Your message is wrapped in the fine-tuning format, earlier turns
+  included, and generation stops at `<|endoftext|>`, or where the model starts writing your
+  next message. Chosen automatically for chat models (`chat-tiny`). A base model in chat mode
+  just rambles until the length limit: it never learned the format.
+- **Complete:** type the beginning of a text and watch Z continue it, token by token.
+  "Continue from output" feeds the result back in. This is what a base model does: `ROMEO:`
+  gets a speech from the Shakespeare model.
 
 You can leave the server running while training. With no checkpoints yet, the page waits and
 picks up the first one by itself (saved at step 200). To see a newer checkpoint, reload
@@ -113,6 +165,7 @@ only load checkpoints the server found itself.
 | `configs/tiny.yaml` | 0.92M | 128 | 4 × 4 × 128 | CPU, minutes |
 | `configs/small.yaml` | 4.98M | 256 | 6 × 8 × 256 | GPU (or hours on CPU) |
 | `configs/fineweb-tiny.yaml` | 1.31M | 128 | 4 × 4 × 128 | CPU, FineWeb-Edu, vocab 4096 |
+| `configs/chat-tiny.yaml` | 1.31M | 128 | 4 × 4 × 128 | chat fine-tuning of `fineweb-tiny` |
 
 Override any value without editing the file:
 
@@ -147,27 +200,29 @@ The tests cover the tokenizer, the config loader, the data loader and the model:
 output shapes, causality, initial loss ≈ ln(vocab), overfitting a single batch, and the
 properties of RoPE. They also cover the LR schedule, bit-identical resume from a
 checkpoint, generation, and the HTTP range reader (offline, against in-memory bytes).
-They also start the playground server on a free port and check streaming, seeding and
-the rejection of bad requests. The tokenizer's fast incremental BPE trainer is checked
+They also check that loss masks really exclude the masked targets from the loss, and start
+the playground server on a free port to check streaming, seeding, the chat prompt format
+and the rejection of bad requests. The tokenizer's fast incremental BPE trainer is checked
 against a simple reference implementation.
 
 ## Project layout
 
 ```
-configs/             tiny.yaml, small.yaml, fineweb-tiny.yaml
+configs/             tiny.yaml, small.yaml, fineweb-tiny.yaml, chat-tiny.yaml
 zlm/
   tokenizer.py       byte-level BPE: train, encode, decode, save/load
-  data.py            random (x, y) batches from memory-mapped .bin token files
+  data.py            random (x, y) batches from memory-mapped .bin token files, loss masks
   config.py          typed dataclass config loaded from YAML, with --set overrides
   device.py          CUDA → MPS → CPU, autocast dtype, torch.compile decision
   model.py           Z: attention, MLP, blocks, RoPE / learned positions, generate()
   schedule.py        warmup + cosine learning-rate schedule
   checkpoint.py      atomic save, full-resume load, load_model() for sampling
   httpfile.py        seekable file over HTTP range requests (partial Parquet downloads)
-  server.py          playground HTTP server: model list, streaming /api/generate
+  server.py          playground HTTP server: model list, streaming /api/generate, chat mode
   playground.html    the playground page
 scripts/
   prepare_data.py    download (Shakespeare, FineWeb-Edu), split, tokenize to .bin files
+  prepare_chat.py    conversation dataset for chat fine-tuning, with loss masks
   train_tokenizer.py train a tokenizer on any text file
   train.py           the training loop
   sample.py          generate text from a checkpoint
@@ -183,4 +238,5 @@ tests/               pytest unit tests
 - [ ] RoPE vs learned positional encoding ablation on tinyShakespeare
 - [ ] Larger runs on GPU
 - [x] Data pipeline for a slice of FineWeb-Edu
-- [ ] Train on FineWeb-Edu and compare samples with the Shakespeare model
+- [x] Pretrain on FineWeb-Edu (`fineweb-tiny`)
+- [x] Chat fine-tuning: Z introduces itself (`chat-tiny`)
