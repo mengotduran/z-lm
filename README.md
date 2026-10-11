@@ -13,6 +13,8 @@ in the code.
   an interrupted run continues bit-identically.
 - **Device agnostic:** picks CUDA → MPS → CPU automatically; mixed precision and
   `torch.compile` switch on only on a GPU. Moving from CPU to GPU is a config change.
+- **Data:** tinyShakespeare to start, then a slice of FineWeb-Edu, downloaded partially
+  (only the needed bytes of a 2 GB Parquet shard) and pre-tokenized to memory-mapped `.bin` files.
 - **Config driven:** model size, training and data settings live in `configs/*.yaml`, and any
   value can be overridden from the command line.
 
@@ -56,12 +58,39 @@ Training writes to `checkpoints/<run>/`:
 
 Interrupted? Run the same command with `--resume`.
 
+## Web text: FineWeb-Edu
+
+[FineWeb-Edu](https://huggingface.co/datasets/HuggingFaceFW/fineweb-edu) is web text filtered
+for educational quality. `prepare_data.py` reads the first `--max-mb` of text from one 2 GB
+Parquet shard of its 10B-token sample. HTTP range requests fetch only the index and the `text`
+column of the row groups it needs, so 400 MB of text means roughly 400 MB of download, not 2 GB.
+
+```bash
+pip install pyarrow   # only needed for this step
+
+# ~400 MB of text -> ~115M tokens, vocab 4096 (tokenizer trained on a 10 MB sample)
+python scripts/prepare_data.py --dataset fineweb-edu --vocab-size 4096
+
+# Quick try first: ~20 MB, a couple of minutes
+python scripts/prepare_data.py --dataset fineweb-edu --vocab-size 4096 --max-mb 20 --tokenizer-mb 5
+
+python scripts/train.py --config configs/fineweb-tiny.yaml
+python scripts/sample.py --checkpoint checkpoints/fineweb-tiny/best.pt --prompt "The water cycle"
+```
+
+The downloaded text is cached in `data/fineweb-edu/docs-<N>mb.parquet`, so re-running (for
+example with another vocab size) works offline. The tokenizer is reused when its vocab size
+matches. Delete `data/fineweb-edu/tokenizer.model` to retrain it on a different sample.
+Documents are separated by `<|endoftext|>`, and the validation set is the last 1% of
+documents, each kept whole.
+
 ## Configs
 
 | Config | Parameters | Context | Layers × heads × width | Meant for |
 |---|---|---|---|---|
 | `configs/tiny.yaml` | 0.92M | 128 | 4 × 4 × 128 | CPU, minutes |
 | `configs/small.yaml` | 4.98M | 256 | 6 × 8 × 256 | GPU (or hours on CPU) |
+| `configs/fineweb-tiny.yaml` | 1.31M | 128 | 4 × 4 × 128 | CPU, FineWeb-Edu, vocab 4096 |
 
 Override any value without editing the file:
 
@@ -95,12 +124,14 @@ pytest
 The tests cover the tokenizer, the config loader, the data loader and the model:
 output shapes, causality, initial loss ≈ ln(vocab), overfitting a single batch, and the
 properties of RoPE. They also cover the LR schedule, bit-identical resume from a
-checkpoint, and generation.
+checkpoint, generation, and the HTTP range reader (offline, against in-memory bytes).
+The tokenizer's fast incremental BPE trainer is checked against a simple reference
+implementation.
 
 ## Project layout
 
 ```
-configs/             tiny.yaml, small.yaml
+configs/             tiny.yaml, small.yaml, fineweb-tiny.yaml
 zlm/
   tokenizer.py       byte-level BPE: train, encode, decode, save/load
   data.py            random (x, y) batches from memory-mapped .bin token files
@@ -109,8 +140,9 @@ zlm/
   model.py           Z: attention, MLP, blocks, RoPE / learned positions, generate()
   schedule.py        warmup + cosine learning-rate schedule
   checkpoint.py      atomic save, full-resume load, load_model() for sampling
+  httpfile.py        seekable file over HTTP range requests (partial Parquet downloads)
 scripts/
-  prepare_data.py    download, split, tokenize to uint16 .bin files
+  prepare_data.py    download (Shakespeare, FineWeb-Edu), split, tokenize to .bin files
   train_tokenizer.py train a tokenizer on any text file
   train.py           the training loop
   sample.py          generate text from a checkpoint
@@ -123,4 +155,5 @@ tests/               pytest unit tests
 - [x] Tokenizer, data pipeline, model, training loop, checkpoints, sampling
 - [ ] RoPE vs learned positional encoding ablation on tinyShakespeare
 - [ ] Larger runs on GPU
-- [ ] Train on a slice of FineWeb or OpenWebText
+- [x] Data pipeline for a slice of FineWeb-Edu
+- [ ] Train on FineWeb-Edu and compare samples with the Shakespeare model
