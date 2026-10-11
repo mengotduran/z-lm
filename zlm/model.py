@@ -26,6 +26,7 @@ Design choices, all standard in modern GPTs:
 from __future__ import annotations
 
 import math
+from collections.abc import Iterator
 
 import torch
 import torch.nn as nn
@@ -251,6 +252,22 @@ class Z(nn.Module):
         O(T^2) work per token, but with block_size 128-256 it is still fast, and it keeps
         the model code free of generation-only state.
         """
+        new = list(self.generate_stream(idx, max_new_tokens, temperature, top_k))
+        return torch.cat([idx, *new], dim=1)
+
+    @torch.no_grad()
+    def generate_stream(
+        self,
+        idx: torch.Tensor,
+        max_new_tokens: int,
+        temperature: float = 1.0,
+        top_k: int | None = None,
+    ) -> Iterator[torch.Tensor]:
+        """Like generate(), but yields each new token (B, 1) as soon as it is sampled.
+
+        A generator, so a caller (the web playground) can show text while it is being
+        written, and simply stop iterating to stop generation early.
+        """
         for _ in range(max_new_tokens):
             # The model can't see more than block_size tokens: keep only the most recent ones.
             context = idx[:, -self.cfg.block_size:]
@@ -267,4 +284,4 @@ class Z(nn.Module):
                 probs = F.softmax(logits, dim=-1)
                 next_id = torch.multinomial(probs, num_samples=1)  # (B, 1)
             idx = torch.cat([idx, next_id], dim=1)
-        return idx
+            yield next_id

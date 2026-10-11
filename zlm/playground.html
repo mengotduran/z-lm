@@ -1,0 +1,290 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Z Playground</title>
+<style>
+  :root {
+    --bg: #f7f7f5; --panel: #ffffff; --text: #1d1d1b; --muted: #6b6b66; --border: #e2e1dc;
+    --accent: #3b5bdb; --accent-text: #ffffff; --prompt: #8a8a84; --error: #c92a2a;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #161615; --panel: #1f1f1d; --text: #ecebe6; --muted: #9a9993; --border: #34342f;
+      --accent: #748ffc; --accent-text: #10121a; --prompt: #7d7c76; --error: #ff8787;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  main { max-width: 860px; margin: 0 auto; padding: 24px 16px 48px; }
+  header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 16px; margin-bottom: 16px; }
+  h1 { font-size: 20px; margin: 0; }
+  h1 span { color: var(--muted); font-weight: 400; }
+  .note { color: var(--muted); font-size: 13px; margin: 0; }
+  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 16px; }
+  .row { display: flex; flex-wrap: wrap; gap: 12px 20px; align-items: center; }
+  label { font-size: 13px; color: var(--muted); display: flex; gap: 8px; align-items: center; }
+  select, input[type=number], textarea {
+    font: inherit; color: var(--text); background: var(--bg);
+    border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px;
+  }
+  select { max-width: 100%; }
+  input[type=number] { width: 80px; }
+  input[type=range] { width: 120px; accent-color: var(--accent); }
+  output { font-variant-numeric: tabular-nums; min-width: 3ch; color: var(--text); }
+  #model-info { font-size: 13px; color: var(--muted); margin-top: 8px; }
+  textarea {
+    width: 100%; min-height: 96px; resize: vertical; margin-top: 16px;
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 14px;
+  }
+  .buttons { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; align-items: center; }
+  button {
+    font: inherit; font-size: 14px; border-radius: 6px; padding: 7px 14px; cursor: pointer;
+    border: 1px solid var(--border); background: var(--panel); color: var(--text);
+  }
+  button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
+  button:disabled { opacity: 0.45; cursor: default; }
+  kbd { font-size: 12px; color: var(--muted); }
+  #output {
+    margin-top: 16px; min-height: 160px; white-space: pre-wrap; word-wrap: break-word;
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 14px; line-height: 1.6;
+  }
+  #output .prompt { color: var(--prompt); }
+  #output .placeholder { color: var(--muted); font-family: system-ui, sans-serif; }
+  .notice {
+    font-family: system-ui, sans-serif; border: 1px dashed var(--accent); border-radius: 8px;
+    padding: 14px 16px; line-height: 1.6;
+  }
+  .notice strong { display: block; margin-bottom: 4px; }
+  .notice code {
+    display: block; margin: 8px 0; padding: 8px 10px; border-radius: 6px; background: var(--bg);
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; white-space: pre-wrap;
+  }
+  #output.running .gen::after { content: "▍"; color: var(--accent); }
+  #stats { font-size: 13px; color: var(--muted); margin-top: 8px; min-height: 1.5em; }
+  #stats.error { color: var(--error); }
+  code { font-size: 13px; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Z <span>playground</span></h1>
+    <p class="note">Z is a base model: it continues your text; it doesn't answer questions.</p>
+  </header>
+
+  <div class="panel">
+    <div class="row">
+      <label>Model <select id="model"></select></label>
+    </div>
+    <div id="model-info"></div>
+
+    <textarea id="prompt" spellcheck="false" placeholder="Type the beginning of a text, e.g. ROMEO:">ROMEO:</textarea>
+
+    <div class="row" style="margin-top: 12px">
+      <label title="Below 1: safer, more repetitive. Above 1: more surprising, more errors. 0: always the most likely token.">
+        Temperature <input id="temperature" type="range" min="0" max="2" step="0.05" value="0.8">
+        <output id="temperature-v">0.8</output>
+      </label>
+      <label title="Sample only among the k most likely tokens. 0 = off.">
+        Top-k <input id="top_k" type="number" min="0" max="65536" value="50">
+      </label>
+      <label>
+        Length <input id="max_new_tokens" type="range" min="10" max="1000" step="10" value="200">
+        <output id="max_new_tokens-v">200</output>
+      </label>
+      <label title="Same seed + same settings = same text. Empty = random.">
+        Seed <input id="seed" type="number" placeholder="random">
+      </label>
+    </div>
+
+    <div class="buttons">
+      <button id="generate" class="primary">Generate</button>
+      <button id="stop" disabled>Stop</button>
+      <button id="continue" disabled title="Use the whole output as the next prompt">Continue from output</button>
+      <kbd>Ctrl+Enter to generate</kbd>
+    </div>
+  </div>
+
+  <div class="panel" style="margin-top: 16px">
+    <div id="output"><span class="placeholder">The model's continuation appears here, token by token.</span></div>
+    <div id="stats"></div>
+  </div>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let models = [];
+let controller = null;     // AbortController of the running request, null when idle
+let lastFull = "";         // prompt + generated text of the last run, for "Continue"
+
+for (const id of ["temperature", "max_new_tokens"]) {
+  $(id).addEventListener("input", () => { $(id + "-v").textContent = $(id).value; });
+}
+
+function describe(m) {
+  const val = m.best_val != null ? ` · best val loss ${m.best_val.toFixed(3)}` : "";
+  return `${m.params.toLocaleString()} parameters · ${m.pos_encoding} positions · ` +
+         `context ${m.block_size} tokens · vocab ${m.vocab_size} · ${m.data_dir} · step ${m.step}${val}`;
+}
+
+async function loadModels() {
+  const res = await fetch("/api/models");
+  const data = await res.json();
+  models = data.models;
+  const select = $("model");
+  select.innerHTML = "";
+  for (const m of models) {
+    const opt = document.createElement("option");
+    opt.value = m.name;
+    opt.textContent = m.name;
+    select.append(opt);
+  }
+  if (!models.length) {
+    showNoModels(data.checkpoints_dir);
+    // Check again every 5 s: the model appears by itself once training saves a checkpoint.
+    setTimeout(() => loadModels().catch(() => {}), 5000);
+    return;
+  }
+  if (waitingForModels) {
+    waitingForModels = false;
+    $("output").innerHTML = '<span class="placeholder">The model\'s continuation appears here, token by token.</span>';
+  }
+  $("generate").textContent = "Generate";
+  setRunning(false);
+  showInfo();
+}
+
+let waitingForModels = false;
+
+function showNoModels(dir) {
+  // Built with textContent, not innerHTML, so the folder name is shown as plain text.
+  waitingForModels = true;
+  $("model-info").textContent = `No checkpoints in ${dir}/ yet.`;
+  $("generate").disabled = true;
+  $("generate").textContent = "No model loaded";
+  const box = document.createElement("div");
+  box.className = "notice";
+  const title = document.createElement("strong");
+  title.textContent = "No trained model yet: train one, and it shows up here by itself.";
+  const cmd = document.createElement("code");
+  cmd.textContent = "python scripts/train.py --config configs/tiny.yaml";
+  const after = document.createElement("span");
+  after.textContent = "The first checkpoint is saved after 200 steps (about 2 minutes on a laptop CPU). " +
+    "This page checks every few seconds; no need to reload.";
+  box.append(title, cmd, after);
+  $("output").replaceChildren(box);
+}
+
+function showInfo() {
+  const m = models.find((m) => m.name === $("model").value);
+  $("model-info").textContent = m ? describe(m) : "";
+}
+$("model").addEventListener("change", showInfo);
+
+function setRunning(running) {
+  $("generate").disabled = running || !models.length;
+  $("stop").disabled = !running;
+  $("continue").disabled = running || !lastFull;
+  $("output").classList.toggle("running", running);
+}
+
+function showError(message) {
+  $("stats").textContent = message;
+  $("stats").classList.add("error");
+}
+
+async function generate() {
+  if (controller || !models.length) return;
+  const prompt = $("prompt").value;
+  const body = {
+    checkpoint: $("model").value,
+    prompt,
+    temperature: Number($("temperature").value),
+    top_k: Number($("top_k").value),
+    max_new_tokens: Number($("max_new_tokens").value),
+    seed: $("seed").value,
+  };
+
+  // Show the prompt greyed out, followed by the generated text as it arrives.
+  const out = $("output");
+  out.innerHTML = "";
+  const promptSpan = document.createElement("span");
+  promptSpan.className = "prompt";
+  promptSpan.textContent = prompt;
+  const gen = document.createElement("span");
+  gen.className = "gen";
+  out.append(promptSpan, gen);
+  $("stats").textContent = "generating…";
+  $("stats").classList.remove("error");
+
+  controller = new AbortController();
+  setRunning(true);
+  let generated = "";
+  try {
+    const res = await fetch("/api/generate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+    if (!res.ok) {
+      showError((await res.json()).error || res.statusText);
+      return;
+    }
+    // Read the body as it streams in. Chunks don't line up with lines, so keep the
+    // unfinished end of each chunk in `buffer` until its newline arrives.
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop();
+      for (const line of lines) {
+        if (!line) continue;
+        const msg = JSON.parse(line);
+        if (msg.text) {
+          generated += msg.text;
+          gen.textContent = generated;
+        }
+        if (msg.done) {
+          const rate = msg.tokens / msg.seconds;
+          const cropped = msg.prompt_tokens + msg.tokens > msg.context_limit
+            ? ` · the model only sees the last ${msg.context_limit} tokens` : "";
+          $("stats").textContent =
+            `${msg.tokens} tokens in ${msg.seconds.toFixed(1)}s (${rate.toFixed(0)} tokens/s) · ` +
+            `prompt ${msg.prompt_tokens} tokens${cropped}`;
+        }
+      }
+    }
+  } catch (e) {
+    if (e.name === "AbortError") $("stats").textContent = "stopped";
+    else showError(`request failed: ${e.message}. Is the server still running?`);
+  } finally {
+    lastFull = prompt + generated;
+    controller = null;
+    setRunning(false);
+  }
+}
+
+$("generate").addEventListener("click", generate);
+$("stop").addEventListener("click", () => controller && controller.abort());
+$("continue").addEventListener("click", () => {
+  $("prompt").value = lastFull;
+  generate();
+});
+$("prompt").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); generate(); }
+});
+
+loadModels().catch((e) => showError(`could not load models: ${e.message}`));
+</script>
+</body>
+</html>

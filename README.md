@@ -15,6 +15,8 @@ in the code.
   `torch.compile` switch on only on a GPU. Moving from CPU to GPU is a config change.
 - **Data:** tinyShakespeare to start, then a slice of FineWeb-Edu, downloaded partially
   (only the needed bytes of a 2 GB Parquet shard) and pre-tokenized to memory-mapped `.bin` files.
+- **Web playground:** a local browser page that streams the model's continuation token by
+  token, built on Python's standard-library HTTP server (no web framework).
 - **Config driven:** model size, training and data settings live in `configs/*.yaml`, and any
   value can be overridden from the command line.
 
@@ -84,6 +86,26 @@ matches. Delete `data/fineweb-edu/tokenizer.model` to retrain it on a different 
 Documents are separated by `<|endoftext|>`, and the validation set is the last 1% of
 documents, each kept whole.
 
+## Playground
+
+```bash
+python scripts/serve.py        # then open http://localhost:8000
+```
+
+Type the beginning of a text and watch Z continue it, token by token. You can pick any
+checkpoint under `checkpoints/` (`best.pt` and `ckpt.pt` of each run) and adjust
+temperature, top-k, length and seed. Stop ends a generation early. "Continue from output"
+feeds the result back in as the next prompt.
+
+Z is a *base* model: it was only trained to continue text, not to follow instructions or
+answer questions the way ChatGPT does (that needs a second training stage on conversations).
+So `ROMEO:` gets a speech, while `What is love?` gets text that merely continues the question.
+
+You can leave the server running while training. With no checkpoints yet, the page waits and
+picks up the first one by itself (saved at step 200). To see a newer checkpoint, reload
+the page. By default the server only listens on this computer (`127.0.0.1`), and the page can
+only load checkpoints the server found itself.
+
 ## Configs
 
 | Config | Parameters | Context | Layers × heads × width | Meant for |
@@ -125,8 +147,9 @@ The tests cover the tokenizer, the config loader, the data loader and the model:
 output shapes, causality, initial loss ≈ ln(vocab), overfitting a single batch, and the
 properties of RoPE. They also cover the LR schedule, bit-identical resume from a
 checkpoint, generation, and the HTTP range reader (offline, against in-memory bytes).
-The tokenizer's fast incremental BPE trainer is checked against a simple reference
-implementation.
+They also start the playground server on a free port and check streaming, seeding and
+the rejection of bad requests. The tokenizer's fast incremental BPE trainer is checked
+against a simple reference implementation.
 
 ## Project layout
 
@@ -141,11 +164,14 @@ zlm/
   schedule.py        warmup + cosine learning-rate schedule
   checkpoint.py      atomic save, full-resume load, load_model() for sampling
   httpfile.py        seekable file over HTTP range requests (partial Parquet downloads)
+  server.py          playground HTTP server: model list, streaming /api/generate
+  playground.html    the playground page
 scripts/
   prepare_data.py    download (Shakespeare, FineWeb-Edu), split, tokenize to .bin files
   train_tokenizer.py train a tokenizer on any text file
   train.py           the training loop
   sample.py          generate text from a checkpoint
+  serve.py           start the browser playground
   ablate.py          run and compare variants of one setting
 tests/               pytest unit tests
 ```
@@ -153,6 +179,7 @@ tests/               pytest unit tests
 ## Roadmap
 
 - [x] Tokenizer, data pipeline, model, training loop, checkpoints, sampling
+- [x] Browser playground with streaming generation
 - [ ] RoPE vs learned positional encoding ablation on tinyShakespeare
 - [ ] Larger runs on GPU
 - [x] Data pipeline for a slice of FineWeb-Edu
