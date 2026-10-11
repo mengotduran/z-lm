@@ -227,3 +227,44 @@ class Z(nn.Module):
             # cross_entropy wants (N, classes) and (N,): flatten batch and time together.
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
         return logits, loss
+
+    @torch.no_grad()
+    def generate(
+        self,
+        idx: torch.Tensor,
+        max_new_tokens: int,
+        temperature: float = 1.0,
+        top_k: int | None = None,
+    ) -> torch.Tensor:
+        """Extend each sequence in idx (B, T) by max_new_tokens sampled tokens, one at a time.
+
+        Autoregressive generation: predict a distribution over the next token, draw one token
+        from it, append it, and feed the longer sequence back in.
+
+        temperature: logits are divided by it before the softmax. < 1 sharpens the distribution
+            (safer, more repetitive text), > 1 flattens it (more surprising, more errors).
+            0 means greedy: always take the single most likely token.
+        top_k: sample only among the k most likely tokens. Cuts off the long tail of unlikely
+            tokens, each individually rare but together often picked, that derails the text.
+
+        No KV cache: every step recomputes attention over the whole context. That is
+        O(T^2) work per token, but with block_size 128-256 it is still fast, and it keeps
+        the model code free of generation-only state.
+        """
+        for _ in range(max_new_tokens):
+            # The model can't see more than block_size tokens: keep only the most recent ones.
+            context = idx[:, -self.cfg.block_size:]
+            logits, _ = self(context)
+            logits = logits[:, -1, :]  # only the last position predicts the *next* token
+            if temperature == 0:
+                next_id = logits.argmax(dim=-1, keepdim=True)
+            else:
+                logits = logits / temperature
+                if top_k is not None:
+                    # Everything below the k-th largest logit gets -inf, i.e. probability 0.
+                    kth = torch.topk(logits, min(top_k, logits.size(-1))).values[:, -1:]
+                    logits = logits.masked_fill(logits < kth, float("-inf"))
+                probs = F.softmax(logits, dim=-1)
+                next_id = torch.multinomial(probs, num_samples=1)  # (B, 1)
+            idx = torch.cat([idx, next_id], dim=1)
+        return idx

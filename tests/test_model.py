@@ -170,3 +170,53 @@ def test_rope_buffers_not_in_checkpoint():
     # cos/sin are recomputed from the config, so they shouldn't bloat the state_dict.
     keys = make_model("rope").state_dict().keys()
     assert not any(k.endswith((".cos", ".sin")) for k in keys)
+
+
+# --- generation ------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("pos", POS)
+def test_generate_appends_tokens_and_keeps_prompt(pos):
+    model = make_model(pos).eval()
+    prompt = random_tokens(2, 5)
+    out = model.generate(prompt, max_new_tokens=7, temperature=1.0, top_k=10)
+    assert out.shape == (2, 12)
+    assert torch.equal(out[:, :5], prompt)
+    assert out.min() >= 0 and out.max() < VOCAB
+
+
+@pytest.mark.parametrize("pos", POS)
+def test_generate_beyond_block_size(pos):
+    # Longer than the context window: generate must crop, not crash in forward.
+    model = make_model(pos).eval()
+    out = model.generate(random_tokens(1, 10), max_new_tokens=30)
+    assert out.shape == (1, 40)
+
+
+def test_greedy_matches_argmax_and_top_k_1():
+    model = make_model().eval()
+    prompt = random_tokens(1, 4)
+    greedy = model.generate(prompt, max_new_tokens=8, temperature=0)
+    # top_k=1 leaves a single candidate, so sampling has no choice: same as greedy.
+    assert torch.equal(model.generate(prompt, max_new_tokens=8, top_k=1), greedy)
+    # And the first greedy token is the argmax of the model's prediction.
+    assert greedy[0, 4] == model(prompt)[0][0, -1].argmax()
+
+
+def test_top_k_only_samples_from_top_k():
+    model = make_model().eval()
+    prompt = random_tokens(1, 4)
+    allowed = set(model(prompt)[0][0, -1].topk(3).indices.tolist())
+    torch.manual_seed(0)
+    firsts = {model.generate(prompt, max_new_tokens=1, top_k=3)[0, -1].item() for _ in range(50)}
+    assert firsts <= allowed
+
+
+def test_generate_is_reproducible_with_seed():
+    model = make_model().eval()
+    prompt = random_tokens(1, 4)
+    torch.manual_seed(42)
+    a = model.generate(prompt, max_new_tokens=10)
+    torch.manual_seed(42)
+    b = model.generate(prompt, max_new_tokens=10)
+    assert torch.equal(a, b)
