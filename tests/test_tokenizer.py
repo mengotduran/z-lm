@@ -1,6 +1,6 @@
 import pytest
 
-from zlm.tokenizer import SPLIT_PATTERN, BPETokenizer, get_pair_counts, merge
+from zlm.tokenizer import EOT, SPLIT_PATTERN, BPETokenizer, get_pair_counts, merge
 
 SAMPLE = (
     "First Citizen:\nBefore we proceed any further, hear me speak.\n\n"
@@ -46,12 +46,12 @@ def test_untrained_is_raw_bytes():
 
 def test_vocab_size_reached(trained):
     assert trained.vocab_size == 300
-    assert len(trained.merges) == 300 - 256
+    assert len(trained.merges) == 300 - 256 - 1  # 1 special token: <|endoftext|>
 
 
 def test_first_merge_is_most_frequent_pair():
     tok = BPETokenizer()
-    tok.train("aaab aaab aaab", vocab_size=257)
+    tok.train("aaab aaab aaab", vocab_size=257, special_tokens=())
     assert tok.merges == {(97, 97): 256}  # "aa" is the most frequent pair
     assert tok.vocab[256] == b"aa"
 
@@ -74,15 +74,16 @@ def test_merges_never_cross_chunk_boundaries(trained):
         assert " " not in text.lstrip(" "), f"token {token!r} spans two words"
 
 
-def test_vocab_size_below_256_rejected():
+def test_vocab_size_too_small_rejected():
     with pytest.raises(ValueError):
-        BPETokenizer().train("abc", vocab_size=100)
+        BPETokenizer().train("abc", vocab_size=256)  # no room for <|endoftext|>
 
 
 def test_training_stops_when_nothing_left_to_merge():
     tok = BPETokenizer()
     tok.train("ab", vocab_size=1000)
-    assert tok.vocab_size == 257  # only one possible merge: "a" + "b"
+    assert len(tok.merges) == 1  # only one possible merge: "a" + "b"
+    assert tok.vocab_size == 258  # 256 bytes + 1 merge + <|endoftext|>
 
 
 # --- encode / decode ---------------------------------------------------------
@@ -107,3 +108,48 @@ def test_decode_invalid_utf8_does_not_crash():
     tok = BPETokenizer()
     emoji = tok.encode("🤖")  # 4 bytes
     assert tok.decode(emoji[:2]) == "�"  # half an emoji -> replacement character
+
+
+# --- special tokens ----------------------------------------------------------
+
+def test_special_token_ids_follow_merges(trained):
+    assert trained.eot_id == trained.vocab_size - 1
+    assert sorted(trained.vocab) == list(range(trained.vocab_size))  # ids have no gaps
+
+
+def test_special_tokens_ignored_during_training():
+    tok = BPETokenizer()
+    tok.train(("hello world" + EOT) * 50, vocab_size=300)
+    for token in tok.vocab.values():
+        if token != EOT.encode():
+            assert b"<|" not in token and b"endoftext" not in token
+
+
+def test_special_tokens_only_when_allowed(trained):
+    text = "Speak." + EOT + "All:"
+    ordinary = trained.encode(text)
+    special = trained.encode(text, allow_special=True)
+    assert trained.eot_id not in ordinary
+    assert special.count(trained.eot_id) == 1
+    assert trained.decode(ordinary) == trained.decode(special) == text
+
+
+# --- save / load -------------------------------------------------------------
+
+def test_save_load_roundtrip(trained, tmp_path):
+    path = tmp_path / "tok.model"
+    trained.save(path)
+    loaded = BPETokenizer.load(path)
+    assert loaded.merges == trained.merges
+    assert loaded.special_tokens == trained.special_tokens
+    assert loaded.vocab == trained.vocab
+    text = "First Citizen: speak, 🤖" + EOT
+    assert loaded.encode(text, allow_special=True) == trained.encode(text, allow_special=True)
+    assert (tmp_path / "tok.vocab").exists()  # human-readable companion file
+
+
+def test_load_rejects_wrong_file(tmp_path):
+    path = tmp_path / "not_a_tokenizer.txt"
+    path.write_text("hello\n")
+    with pytest.raises(ValueError):
+        BPETokenizer.load(path)
