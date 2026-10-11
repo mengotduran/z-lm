@@ -22,3 +22,6 @@ wandb/
 .vscode/
 .idea/
 .DS_Store
+
+# Packaging metadata from `pip install -e .`
+*.egg-info/

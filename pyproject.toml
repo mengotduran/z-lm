@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "zlm"
+version = "0.1.0"
+description = "Z: a GPT-style decoder-only language model built from scratch in PyTorch"
+requires-python = ">=3.10"
+# Dependencies live in requirements.txt (torch needs a special index on CPU-only machines).
+
+[tool.setuptools.packages.find]
+include = ["zlm*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.pyright]
+# Tell the editor type-checker to use our .venv (where torch is installed)
+venvPath = "."
+venv = ".venv"
