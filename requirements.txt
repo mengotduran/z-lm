@@ -1,0 +1,16 @@
+# Core
+torch>=2.1        # model, autograd, optimizers
+numpy>=1.24       # np.memmap for the pre-tokenized .bin datasets
+pyyaml>=6.0       # load configs/*.yaml
+
+# Dev
+pytest>=7.4       # unit tests (tokenizer, model shapes)
+
+# Optional (install manually when needed):
+#   wandb         # experiment tracking, off by default
+#
+# CPU-only machine: install torch from the CPU index first to avoid
+# downloading ~2 GB of CUDA libraries you can't use:
+#   pip install torch --index-url https://download.pytorch.org/whl/cpu
+#   pip install -r requirements.txt
+# On an NVIDIA machine, just: pip install -r requirements.txt
