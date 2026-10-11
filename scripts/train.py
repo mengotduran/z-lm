@@ -96,6 +96,13 @@ def check_vocab(cfg: Config) -> None:
                          f"{cfg.data.data_dir} was tokenized with vocab_size={meta['vocab_size']}")
 
 
+def append_metrics(path: Path, row: dict) -> None:
+    # One JSON object per line ("JSON Lines"): appending never rewrites the file, and a
+    # comparison script can read the eval curve of any run without parsing console logs.
+    with path.open("a") as f:
+        f.write(json.dumps(row) + "\n")
+
+
 def seed_everything(seed: int) -> None:
     random.seed(seed)
     np.random.seed(seed)
@@ -118,6 +125,7 @@ def main() -> None:
     tc = cfg.train
     out_dir = Path(tc.out_dir)
     ckpt_path, best_path = out_dir / "ckpt.pt", out_dir / "best.pt"
+    metrics_path = out_dir / "metrics.jsonl"  # eval curve, read by scripts/ablate.py
     if ckpt_path.exists() and not args.resume:
         # A fresh run would overwrite it at the first eval. Make that a deliberate choice.
         raise SystemExit(f"{ckpt_path} exists: pass --resume to continue it, "
@@ -160,10 +168,14 @@ def main() -> None:
                    resume="allow")
 
     if step == 0:
+        # Fresh run: start a new metrics file (a leftover one belongs to a deleted run).
+        out_dir.mkdir(parents=True, exist_ok=True)
+        metrics_path.unlink(missing_ok=True)
         # Baseline before any training: should be close to ln(vocab_size).
         losses = estimate_loss(train_model, {"train": train_data, "val": val_data}, cfg, setup)
         print(f"step 0: train {losses['train']:.4f} | val {losses['val']:.4f} "
               f"(uniform guess = ln {cfg.model.vocab_size} = {math.log(cfg.model.vocab_size):.4f})")
+        append_metrics(metrics_path, {"step": 0, **losses})
 
     # --- training loop ---------------------------------------------------------------
     # `step` counts *completed* optimizer steps. Evaluation and checkpointing happen right
@@ -223,6 +235,9 @@ def main() -> None:
             save_checkpoint(ckpt_path, model, optimizer, step, cfg, scaler if scaler.is_enabled() else None, extra)
             if improved:
                 save_checkpoint(best_path, model, optimizer, step, cfg, scaler if scaler.is_enabled() else None, extra)
+            # After the checkpoint, so a resumed run never logs the same eval twice: every
+            # row in the file is at or before the step the checkpoint will resume from.
+            append_metrics(metrics_path, {"step": step, **losses, "lr": lr})
             t0 = time.perf_counter()  # don't count eval time in the next ms/step
 
     print(f"done: {step} steps, best val loss {best_val:.4f}, checkpoints in {out_dir}/")
