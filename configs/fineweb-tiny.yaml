@@ -1,0 +1,36 @@
+# Z fineweb-tiny: ~1.3M parameters. The tiny model shape, trained on web text (FineWeb-Edu) instead of Shakespeare.
+# Prepare the data first:
+#   python scripts/prepare_data.py --dataset fineweb-edu --vocab-size 4096
+#
+# Differences from tiny.yaml, and why:
+#   vocab_size 4096 - web text has far more distinct words than one play; with 1024 tokens most
+#                     words would be split into many small pieces. Cost: the embedding table
+#                     grows to 4096 x 128 = 0.5M parameters, about 40% of this model.
+#   dropout 0.0     - ~100M tokens of data and 2000 steps x 4,096 tokens = 8M tokens seen: the
+#                     model never sees the same text twice, so it can't overfit and needs no
+#                     regularization. (Shakespeare is repeated ~20 times in a tiny run.)
+
+model:
+  vocab_size: 4096
+  block_size: 128
+  n_layer: 4
+  n_head: 4
+  n_embd: 128
+  dropout: 0.0
+  pos_encoding: rope
+
+train:
+  batch_size: 32
+  grad_accum_steps: 1
+  max_steps: 2000
+  lr: 1e-3
+  min_lr: 1e-4
+  warmup_steps: 100
+  eval_interval: 200
+  out_dir: checkpoints/fineweb-tiny
+
+data:
+  data_dir: data/fineweb-edu
+
+system:
+  device: auto
