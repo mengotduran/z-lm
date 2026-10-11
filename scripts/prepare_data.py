@@ -47,7 +47,7 @@ def load_or_train_tokenizer(path: Path, train_text: str, vocab_size: int) -> BPE
             print(f"reusing {path} (vocab_size={vocab_size})")
             return tok
         print(f"{path} has vocab_size={tok.vocab_size}, want {vocab_size}: retraining")
-    print(f"training tokenizer on the train split (vocab_size={vocab_size}), this takes ~30-60s ...")
+    print(f"training tokenizer on the train split (vocab_size={vocab_size}), this takes a few seconds ...")
     tok = BPETokenizer()
     tok.train(train_text, vocab_size)
     tok.save(path)
