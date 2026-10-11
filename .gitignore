@@ -1,0 +1,24 @@
+# Python bytecode caches
+__pycache__/
+*.py[cod]
+
+# Virtual environments
+.venv/
+venv/
+
+# Datasets: raw downloads and pre-tokenized memmap files (large, regenerable)
+data/**/*.txt
+data/**/*.bin
+
+# Training outputs: checkpoints and logs
+checkpoints/
+*.pt
+wandb/
+
+# Test / tool caches
+.pytest_cache/
+
+# Editor / OS noise
+.vscode/
+.idea/
+.DS_Store
