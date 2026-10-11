@@ -10,16 +10,19 @@ DATA = bytes(range(256)) * 40  # 10,240 bytes, every offset has a recognizable v
 class FakeRemote(HTTPRangeFile):
     """HTTPRangeFile with the network replaced by DATA in memory; records each request."""
 
-    def __init__(self, block: int = 1000) -> None:
+    def __init__(self, block: int = 1000, failures: int = 0, retries: int = 5) -> None:
         self.requests: list[tuple[int, int]] = []
-        super().__init__("fake://file", block=block)
+        self.failures = failures  # how many of the next requests fail, like a dropped network
+        super().__init__("fake://file", block=block, retries=retries)
 
     def _probe(self, url):
         return url, len(DATA)
 
     def _fetch(self, start, end):
         self.requests.append((start, end))
-        self.downloaded += end - start + 1
+        if self.failures > 0:
+            self.failures -= 1
+            raise ConnectionResetError("network switched")
         return DATA[start:end + 1]  # HTTP ranges include the end byte
 
 
@@ -68,3 +71,35 @@ def test_any_block_size_reads_correctly(block):
     f = FakeRemote(block=block)
     f.seek(123)
     assert f.read(2000) == DATA[123:2123]
+
+
+def test_network_errors_are_retried(monkeypatch):
+    monkeypatch.setattr("time.sleep", lambda s: None)  # don't actually wait in tests
+    f = FakeRemote(failures=2)
+    assert f.read(10) == DATA[:10]
+    assert f.requests == [(0, 999)] * 3  # two failures, then success, same range each time
+    assert f.downloaded == 1000          # failed attempts don't count
+
+
+def test_gives_up_after_too_many_failures(monkeypatch):
+    monkeypatch.setattr("time.sleep", lambda s: None)
+    f = FakeRemote(failures=10, retries=3)
+    with pytest.raises(OSError, match="failed after 4 attempts"):
+        f.read(10)
+
+
+def test_short_reply_is_retried(monkeypatch):
+    monkeypatch.setattr("time.sleep", lambda s: None)
+
+    class Truncating(FakeRemote):
+        cut = True
+
+        def _fetch(self, start, end):
+            data = super()._fetch(start, end)
+            if self.cut:  # first reply is cut off mid-transfer
+                self.cut = False
+                return data[:10]
+            return data
+
+    f = Truncating()
+    assert f.read(500) == DATA[:500]
